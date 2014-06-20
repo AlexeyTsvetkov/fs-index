@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+
 struct file_descriptor {
   file_descriptor() {}
   file_descriptor(size_t path_id, std::string file_name)
@@ -16,6 +17,7 @@ private:
   size_t path_id_;
   std::string file_name_;
 };
+
 
 struct suffix_descriptor {
   suffix_descriptor() {}
@@ -45,5 +47,19 @@ private:
   size_t file_id_;
   size_t offset_;
 };
+
+
+inline bool suffix_less(
+  const std::vector<file_descriptor>& files, 
+  const suffix_descriptor& sd1, 
+  const suffix_descriptor& sd2
+) {
+  const std::string& n1 = sd1.full_name(files); 
+  const std::string& n2 = sd2.full_name(files); 
+  int cmp = n1.compare(sd1.offset(), std::string::npos, 
+                       n2, sd2.offset(), std::string::npos);
+
+  return cmp < 0;
+}
 
 #endif

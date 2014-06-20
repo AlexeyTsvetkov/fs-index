@@ -1,82 +1,25 @@
 #include <algorithm>
 #include <exception>
-#include <fstream>
 #include <functional>
 #include <iostream>
-#include <string>
-#include <vector>
 #include <set>
-#include <unordered_set>
 
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/exception.hpp>
 #include <cstdlib>
 
-#include "structs.hpp"
-#include "utils.hpp"
+#include "args.hpp"
+#include "locate.hpp"
+
 
 namespace fs  = boost::filesystem;
 namespace sys = boost::system;
 
-class locate {
-  typedef std::vector<suffix_descriptor>::iterator suf_it;
-public:
-  locate(std::ifstream& in);
-  locate(const locate& other) = delete;
-  const locate& operator=(const locate& other) = delete;
-  ~locate() {}
-
-  void find(const std::string& pattern);
-  bool good() { return in_.good(); }
-private:
-  size_t read_num() { return read_number(in_); }
-  std::string read_str() { return read_string(in_); }
-  file_descriptor read_fd() { return read_file(in_); }
-  suffix_descriptor read_sd() { return read_suffix(in_); }
-  void traverse_suffixes(suf_it it, suf_it end);
-
-  std::ifstream& in_;
-  std::vector<std::string> paths_;
-  std::vector<file_descriptor> files_;
-  std::vector<suffix_descriptor> suffixes_;
-};
-
-bool read_args(int argc, char** argv, std::string& pattern, std::string& index_path) {
-  bool pattern_set = false;
-  bool index_set   = false;
-
-  for (int i = 1; i < argc; ++i) {
-    std::string arg = *(argv + i);
-
-    if (arg == "--database") {
-      if (++i < argc) {
-        index_set = true;
-        index_path.assign(*(argv + i));
-      }
-
-      continue;
-    } 
-
-    if (!pattern_set) { 
-      pattern_set = true;
-      pattern.assign(arg);
-    } else {
-      report_error("Unexpected argument " + arg);
-      return false;
-    }
-  }
-
-  bool all_set = pattern_set && index_set;
-  if (!all_set) 
-    report_error("Not enough arguments");
-  
-  return all_set;
-}
 
 int main(int argc, char** argv) {
   std::string pattern;
   std::string index_path;
-  if (!read_args(argc, argv, pattern, index_path)) {
+  if (!read_locate_args(argc, argv, pattern, index_path)) {
     return EXIT_FAILURE;
   }
 
@@ -99,6 +42,7 @@ int main(int argc, char** argv) {
   return EXIT_SUCCESS;
 }
 
+
 locate::locate(std::ifstream& in)
 : in_(in), paths_(), files_(), suffixes_()
 {
@@ -117,6 +61,7 @@ locate::locate(std::ifstream& in)
   for (size_t i = 0; i < suffix_count; ++i) 
     suffixes_[i] = read_sd();
 }
+
 
 void locate::find(const std::string& pattern) {
   std::function<int(const suffix_descriptor&, const std::string&)> 
@@ -139,6 +84,7 @@ void locate::find(const std::string& pattern) {
 
   traverse_suffixes(low, hi);
 }
+
 
 void locate::traverse_suffixes(suf_it low, suf_it hi) {
   std::set<size_t> file_ids;

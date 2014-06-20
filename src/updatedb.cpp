@@ -1,110 +1,23 @@
-#include <atomic>
-#include <fstream>
+#include <algorithm>
 #include <functional>
 #include <iostream>
-#include <mutex>
-#include <queue>
-#include <string>
 #include <thread>
-#include <vector>
 
-#include <boost/filesystem.hpp>
 #include <boost/filesystem/exception.hpp>
 #include <cstdlib>
 
-#include "structs.hpp"
-#include "utils.hpp"
+#include "updatedb.hpp"
+#include "args.hpp"
+
 
 namespace fs  = boost::filesystem;
 namespace sys = boost::system;
-
-class update_db {
-public:
-  update_db(const std::string& root, std::ofstream& out);
-  update_db(const update_db& other) = delete;
-  const update_db& operator=(const update_db& other) = delete;
-  ~update_db();
-
-  void update();
-private:
-
-  void traverse();
-  void process_dir(const std::string& dir);
-  void add_to_queue(const fs::path& entry);
-  void add_to_index(const fs::path& entry);
-
-  void write_str(const std::string& str) { write_string(out_, str); }
-  void write_num(size_t num) { write_number(out_, num); }
-  void write_fd(const file_descriptor& fd) { write_file(out_, fd); }
-  void write_sd(const suffix_descriptor& sd) { write_suffix(out_, sd); }
-  size_t write_path(const fs::path& entry);
-  size_t add_file(file_descriptor fd);
-  void add_suffixes(size_t file_id, size_t name_size);
-
-  void write_index();
-  void sort_suffixes();
-  void sort_thread(std::vector<suffix_descriptor>* buckets);
-  void sort_bucket(std::vector<suffix_descriptor>& bucket);
-
-  static const unsigned int MAX_THREADS = 8;
-  static const unsigned int ALPHABET = 256;
-
-  std::queue<std::string>  dirs_;
-  std::vector<file_descriptor> files_;
-  std::vector<suffix_descriptor> suffixes_;
-  std::ofstream& out_;
-  std::atomic<int> processing_count_;
-  unsigned int buckets_processed_;
-  size_t paths_count_;
-  std::mutex dir_m_;
-  std::mutex file_m_;
-  std::mutex suffixes_m_;
-  std::mutex out_m_;
-  std::mutex buckets_m_;
-};
-
-
-bool read_args(int argc, char** argv, std::string& root, std::string& index_path) {
-  bool root_set  = false;
-  bool index_set = false;
-
-  for (int i = 1; i < argc; ++i) {
-    std::string arg = *(argv + i);
-
-    if (arg == "--database-root") {
-      if (++i < argc) {
-        root_set = true;
-        root.assign(*(argv + i));
-      }
-
-      continue;
-    } 
-
-    if (arg == "--output") {
-      if (++i < argc) {
-        index_set = true;
-        index_path.assign(*(argv + i));
-      }
-
-      continue;
-    } 
-
-    report_error("Unexpected argument " + arg);
-    return false;
-  }
-
-  bool all_set = root_set && index_set;
-  if (!all_set) 
-    report_error("Not enough arguments");
-  
-  return all_set;
-}
 
 
 int main(int argc, char** argv) {
   std::string root;
   std::string index_path;
-  if (!read_args(argc, argv, root, index_path)) {
+  if (!read_update_args(argc, argv, root, index_path)) {
     return EXIT_FAILURE;
   }
 
@@ -128,7 +41,8 @@ int main(int argc, char** argv) {
 
 
 update_db::update_db(const std::string& root, std::ofstream& out)
-: dirs_(), files_(), 
+: max_threads_(std::max((unsigned int) 2,  std::thread::hardware_concurrency())), 
+  dirs_(), files_(), 
   suffixes_(), out_(out), 
   processing_count_(0),
   buckets_processed_(0),
@@ -152,7 +66,7 @@ update_db::~update_db() {
 
 void update_db::update() {
   std::vector<std::thread> threads;
-  for (unsigned int i = 0; i < MAX_THREADS; ++i) {
+  for (unsigned int i = 0; i < max_threads_; ++i) {
     threads.push_back(std::thread(&update_db::traverse, this));
   }
 
@@ -173,15 +87,15 @@ void update_db::traverse() {
       std::string dir = dirs_.front();
       dirs_.pop();
       processing_count_++;
-      
       dir_m_.unlock();
 
       try {
         process_dir(dir);
-        processing_count_--;
       } catch (std::exception& e) {
         report_error("Could not process directory " + dir);
       }
+      
+      processing_count_--;
     } else {
       dir_m_.unlock();
       if (processing_count_.load() <= 0) 
@@ -222,11 +136,13 @@ void update_db::add_to_queue(const fs::path& entry) {
   dirs_.push(entry.string());
 }
 
+
 size_t update_db::write_path(const fs::path& entry) {
   std::lock_guard<std::mutex> lock(out_m_);
   write_str(entry.string());
   return paths_count_++;
 }
+
 
 size_t update_db::add_file(file_descriptor fd) {
   std::lock_guard<std::mutex> lock(file_m_);
@@ -235,12 +151,14 @@ size_t update_db::add_file(file_descriptor fd) {
   return file_id;
 }
 
+
 void update_db::add_suffixes(size_t file_id, size_t name_size) {
   std::lock_guard<std::mutex> lock(suffixes_m_);
   for (size_t offset = 0; offset < name_size; ++offset) {
     suffixes_.push_back(suffix_descriptor(file_id, offset));
   }
 }
+
 
 void update_db::add_to_index(const fs::path& entry) {
   std::string fname = entry.filename().string();
@@ -260,7 +178,7 @@ void update_db::sort_suffixes() {
 
 
   std::vector<std::thread> threads;
-  for (unsigned int i = 0; i < MAX_THREADS; ++i) {
+  for (unsigned int i = 0; i < max_threads_; ++i) {
     threads.push_back(std::thread(&update_db::sort_thread, this, buckets));
   }
 
@@ -290,20 +208,6 @@ void update_db::sort_thread(std::vector<suffix_descriptor>* buckets) {
 
     sort_bucket(*(buckets + i));
   }
-}
-
-
-bool suffix_less(
-  const std::vector<file_descriptor>& files, 
-  const suffix_descriptor& sd1, 
-  const suffix_descriptor& sd2
-) {
-  const std::string& n1 = sd1.full_name(files); 
-  const std::string& n2 = sd2.full_name(files); 
-  int cmp = n1.compare(sd1.offset(), std::string::npos, 
-                       n2, sd2.offset(), std::string::npos);
-
-  return cmp < 0;
 }
 
 
