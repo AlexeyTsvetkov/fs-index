@@ -37,6 +37,10 @@ private:
   void write_num(size_t num) { write_number(out_, num); }
   void write_fd(const file_descriptor& fd) { write_file(out_, fd); }
   void write_sd(const suffix_descriptor& sd) { write_suffix(out_, sd); }
+  size_t write_path(const fs::path& entry);
+  size_t add_file(file_descriptor fd);
+  void add_suffixes(size_t file_id, size_t name_size);
+
   void write_index();
   void sort_suffixes();
   void sort_thread(std::vector<suffix_descriptor>* buckets);
@@ -168,12 +172,16 @@ void update_db::traverse() {
     if (!dirs_.empty()) {
       std::string dir = dirs_.front();
       dirs_.pop();
-
       processing_count_++;
+      
       dir_m_.unlock();
 
-      process_dir(dir);
-      processing_count_--;
+      try {
+        process_dir(dir);
+        processing_count_--;
+      } catch (std::exception& e) {
+        report_error("Could not process directory " + dir);
+      }
     } else {
       dir_m_.unlock();
       if (processing_count_.load() <= 0) 
@@ -214,25 +222,32 @@ void update_db::add_to_queue(const fs::path& entry) {
   dirs_.push(entry.string());
 }
 
+size_t update_db::write_path(const fs::path& entry) {
+  std::lock_guard<std::mutex> lock(out_m_);
+  write_str(entry.string());
+  return paths_count_++;
+}
+
+size_t update_db::add_file(file_descriptor fd) {
+  std::lock_guard<std::mutex> lock(file_m_);
+  size_t file_id = files_.size();
+  files_.push_back(fd);
+  return file_id;
+}
+
+void update_db::add_suffixes(size_t file_id, size_t name_size) {
+  std::lock_guard<std::mutex> lock(suffixes_m_);
+  for (size_t offset = 0; offset < name_size; ++offset) {
+    suffixes_.push_back(suffix_descriptor(file_id, offset));
+  }
+}
 
 void update_db::add_to_index(const fs::path& entry) {
   std::string fname = entry.filename().string();
   
-  out_m_.lock();
-  write_str(entry.string());
-  size_t path_id = paths_count_++;
-  out_m_.unlock();
-
-  file_m_.lock();
-  size_t file_id = files_.size();
-  files_.push_back(file_descriptor(path_id, fname));
-  file_m_.unlock();
-
-  suffixes_m_.lock();
-  for (size_t offset = 0; offset < fname.size(); ++offset) {
-    suffixes_.push_back(suffix_descriptor(file_id, offset));
-  }
-  suffixes_m_.unlock();
+  size_t path_id = write_path(entry);
+  size_t file_id = add_file(file_descriptor(path_id, fname));
+  add_suffixes(file_id, fname.size());
 }
 
 
